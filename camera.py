@@ -53,17 +53,23 @@ _vqueue: queue.Queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
 _display_lock = threading.Lock()
 _h_display: list = []
 _v_display: list = []
+_h_current: list = [None]   # single-element list so worker can mutate it (h axis)
+_v_current: list = [None]   # single-element list so worker can mutate it (v axis)
 
 
-def _worker(q: queue.Queue, display_list: list) -> None:
+def _worker(q: queue.Queue, display_list: list, current_ref: list) -> None:
     while True:
-        action = q.get()
-        if action is None:   # shutdown signal
+        item = q.get()
+        if item is None:   # shutdown signal
             break
+        action, display_name = item
         with _display_lock:
             if display_list:
-                display_list.pop(0)   # item is now executing, remove from pending
+                display_list.pop(0)      # move from pending → currently executing
+            current_ref[0] = display_name
         action()
+        with _display_lock:
+            current_ref[0] = None        # done executing
 
 
 def _dispatch(action, q: queue.Queue, display_list: list, enabled: bool) -> None:
@@ -88,7 +94,7 @@ def _dispatch(action, q: queue.Queue, display_list: list, enabled: bool) -> None
             display_list.clear()
 
     try:
-        q.put_nowait(action)
+        q.put_nowait((action, display_name))
         with _display_lock:
             display_list.append(display_name)
     except queue.Full:
@@ -103,8 +109,8 @@ def run(motors_enabled: bool = True) -> None:
     """Run the camera + HUD loop. Must be called from the main thread on macOS."""
 
     # Start the two motor worker threads before touching the camera
-    threading.Thread(target=_worker, args=(_hqueue, _h_display), daemon=True, name='motor-h').start()
-    threading.Thread(target=_worker, args=(_vqueue, _v_display), daemon=True, name='motor-v').start()
+    threading.Thread(target=_worker, args=(_hqueue, _h_display, _h_current), daemon=True, name='motor-h').start()
+    threading.Thread(target=_worker, args=(_vqueue, _v_display, _v_current), daemon=True, name='motor-v').start()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -245,14 +251,37 @@ def run(motors_enabled: bool = True) -> None:
 
         # Bottom-left: motor queue display
         with _display_lock:
+            h_current = _h_current[0]
+            v_current = _v_current[0]
             h_pending = list(_h_display)
             v_pending = list(_v_display)
 
         mode_label = '' if motors_enabled else ' (SIM)'
-        h_str = ' > '.join(h_pending) if h_pending else '--'
-        v_str = ' > '.join(v_pending) if v_pending else '--'
-        put(f'PAN{mode_label}:  {h_str}',  (20, frame_h - 110), scale=0.6)
-        put(f'TILT{mode_label}: {v_str}', (20, frame_h - 75),  scale=0.6)
+        font  = cv2.FONT_HERSHEY_SIMPLEX
+        qscale = 0.6 * UI_SCALE
+        qthick = max(2, int(2 * UI_SCALE))
+        GREEN = (0, 220, 0)
+
+        def draw_queue_line(label, current, pending, y):
+            # Label in white
+            (lw, _), _ = cv2.getTextSize(label, font, qscale, qthick)
+            put(label, (20, y), scale=0.6)
+            x = 20 + lw + 6
+            # Currently executing item in green
+            if current:
+                cv2.putText(frame, current, (x, y), font, qscale, GREEN, qthick, cv2.LINE_AA)
+                (cw, _), _ = cv2.getTextSize(current, font, qscale, qthick)
+                x += cw + 6
+            # Pending items in white
+            if pending:
+                sep = '  >  ' if current else ''
+                pend_str = sep + ' > '.join(pending)
+                put(pend_str, (x, y), scale=0.6)
+            elif not current:
+                put('--', (x, y), scale=0.6)
+
+        draw_queue_line(f'PAN{mode_label}:',  h_current, h_pending, frame_h - 110)
+        draw_queue_line(f'TILT{mode_label}:', v_current, v_pending, frame_h - 75)
 
         # Bottom-left: countdown
         remaining = max(0, COUNTDOWN_START - int(now - countdown_start))
