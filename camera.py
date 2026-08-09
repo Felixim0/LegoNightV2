@@ -24,8 +24,12 @@ except ImportError:
 
 from motors import (LEFT_RIGHT_POWER_WHEN_IN_FACE_BOX,
                     LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX,
+                    LEFT_RIGHT_STEP_WHEN_IN_FACE_BOX,
+                    LEFT_RIGHT_STEP_WHEN_NOT_IN_FACE_BOX,
                     UP_DOWN_POWER_WHEN_IN_FACE_BOX,
-                    UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX, moveDown, moveLeft,
+                    UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX,
+                    UP_DOWN_STEP_WHEN_IN_FACE_BOX,
+                    UP_DOWN_STEP_WHEN_NOT_IN_FACE_BOX, moveDown, moveLeft,
                     moveRight, moveUp, shutdown)
 
 # ----------------------------
@@ -268,15 +272,20 @@ def run(motors_enabled: bool = True) -> None:
             dx = face_cx - frame_cx
             dy = face_cy - frame_cy
 
-            # Is the crosshair already inside the face box? Use slower power if so.
+            # Is the crosshair already inside the face box? Use slower power + brake if so.
             h_in_box = (x <= frame_cx <= x + w)
             v_in_box = (y <= frame_cy <= y + h)
             h_power  = LEFT_RIGHT_POWER_WHEN_IN_FACE_BOX if h_in_box else LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX
             v_power  = UP_DOWN_POWER_WHEN_IN_FACE_BOX    if v_in_box else UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX
+            h_step   = LEFT_RIGHT_STEP_WHEN_IN_FACE_BOX  if h_in_box else LEFT_RIGHT_STEP_WHEN_NOT_IN_FACE_BOX
+            v_step   = UP_DOWN_STEP_WHEN_IN_FACE_BOX     if v_in_box else UP_DOWN_STEP_WHEN_NOT_IN_FACE_BOX
+            # Inside box → brake (precise stop); outside box → coast (don't waste time braking)
+            h_brake  = h_in_box
+            v_brake  = v_in_box
 
-            def _bound(fn, power):
-                """Bind power to a motor function, preserving its name for the HUD."""
-                wrapped = functools.partial(fn, power=power)
+            def _bound(fn, power, step, brake):
+                """Bind power + step + brake to a motor function, preserving its name for the HUD."""
+                wrapped = functools.partial(fn, power=power, step=step, brake=brake)
                 wrapped.__name__ = fn.__name__
                 return wrapped
 
@@ -288,13 +297,13 @@ def run(motors_enabled: bool = True) -> None:
             if dx < -TOLERANCE:
                 x_instruction = 'LEFT'
                 if now - last_h_dispatch >= DISPATCH_INTERVAL:
-                    _dispatch(_bound(moveLeft, h_power), _hqueue, _h_display, motors_enabled)
+                    _dispatch(_bound(moveLeft, h_power, h_step, h_brake), _hqueue, _h_display, motors_enabled)
                     last_h_dispatch = now
                     h_dispatched = True
             elif dx > TOLERANCE:
                 x_instruction = 'RIGHT'
                 if now - last_h_dispatch >= DISPATCH_INTERVAL:
-                    _dispatch(_bound(moveRight, h_power), _hqueue, _h_display, motors_enabled)
+                    _dispatch(_bound(moveRight, h_power, h_step, h_brake), _hqueue, _h_display, motors_enabled)
                     last_h_dispatch = now
                     h_dispatched = True
             else:
@@ -306,13 +315,13 @@ def run(motors_enabled: bool = True) -> None:
             if dy < -TOLERANCE:
                 y_instruction = 'UP'
                 if now - last_v_dispatch >= DISPATCH_INTERVAL:
-                    _dispatch(_bound(moveUp, v_power), _vqueue, _v_display, motors_enabled)
+                    _dispatch(_bound(moveUp, v_power, v_step, v_brake), _vqueue, _v_display, motors_enabled)
                     last_v_dispatch = now
                     v_dispatched = True
             elif dy > TOLERANCE:
                 y_instruction = 'DOWN'
                 if now - last_v_dispatch >= DISPATCH_INTERVAL:
-                    _dispatch(_bound(moveDown, v_power), _vqueue, _v_display, motors_enabled)
+                    _dispatch(_bound(moveDown, v_power, v_step, v_brake), _vqueue, _v_display, motors_enabled)
                     last_v_dispatch = now
                     v_dispatched = True
             else:

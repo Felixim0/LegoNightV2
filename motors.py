@@ -13,16 +13,21 @@ import time
 # ----------------------------
 # Settings
 # ----------------------------
-UP_DOWN_STEP     = 360
-LEFT_RIGHT_STEP  = 30
+# STEP LEFT RIGHT
+LEFT_RIGHT_STEP_WHEN_NOT_IN_FACE_BOX = 15
+LEFT_RIGHT_STEP_WHEN_IN_FACE_BOX     = 30
 
-# Power when crosshair is OUTSIDE the face box (fast approach)
-LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX = 30
-UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX    = 100
+# STEP UP DOWN
+UP_DOWN_STEP_WHEN_NOT_IN_FACE_BOX    = 360
+UP_DOWN_STEP_WHEN_IN_FACE_BOX        = 360
 
-# Power when crosshair is INSIDE the face box (slow fine-adjustment)
-LEFT_RIGHT_POWER_WHEN_IN_FACE_BOX     = 15
+# POWER LEFT RIGHT
+LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX = 60
+LEFT_RIGHT_POWER_WHEN_IN_FACE_BOX     = 30
+
+# POWER UP DOWN
 UP_DOWN_POWER_WHEN_IN_FACE_BOX        = 40
+UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX    = 100
 
 # ----------------------------
 # Hardware setup
@@ -52,27 +57,27 @@ except Exception as _e:
 # Movement functions
 # ----------------------------
 
-def moveLeft(power=LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX):
+def moveLeft(power=LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX, step=LEFT_RIGHT_STEP_WHEN_NOT_IN_FACE_BOX, brake=False):
     if not _NXT_READY: return
-    motor_a.turn(power, LEFT_RIGHT_STEP)
+    motor_a.turn(power, step, brake=brake)
     time.sleep(1)
 
 
-def moveRight(power=LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX):
+def moveRight(power=LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX, step=LEFT_RIGHT_STEP_WHEN_NOT_IN_FACE_BOX, brake=False):
     if not _NXT_READY: return
-    motor_a.turn(-power, LEFT_RIGHT_STEP)
+    motor_a.turn(-power, step, brake=brake)
     time.sleep(1)
 
 
-def moveUp(power=UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX):
+def moveUp(power=UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX, step=UP_DOWN_STEP_WHEN_NOT_IN_FACE_BOX, brake=False):
     if not _NXT_READY: return
-    motor_b.turn(power, UP_DOWN_STEP)
+    motor_b.turn(power, step, brake=brake)
     time.sleep(1)
 
 
-def moveDown(power=UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX):
+def moveDown(power=UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX, step=UP_DOWN_STEP_WHEN_NOT_IN_FACE_BOX, brake=False):
     if not _NXT_READY: return
-    motor_b.turn(-power, UP_DOWN_STEP)
+    motor_b.turn(-power, step, brake=brake)
     time.sleep(1)
 
 
