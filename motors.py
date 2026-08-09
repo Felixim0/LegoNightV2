@@ -15,9 +15,11 @@ import nxt.motor
 # ----------------------------
 # Settings
 # ----------------------------
-STEP_DEGREES     = 360
-LEFT_RIGHT_POWER = 50
+UP_DOWN_STEP     = 360
+LEFT_RIGHT_STEP  = 30
+
 UP_DOWN_POWER    = 100
+LEFT_RIGHT_POWER = 30
 
 MOTOR_LEFT_RIGHT_PORT = nxt.motor.Port.A
 MOTOR_UP_DOWN_PORT    = nxt.motor.Port.B
@@ -34,22 +36,22 @@ motor_b = brick.get_motor(MOTOR_UP_DOWN_PORT)
 # ----------------------------
 
 def moveLeft():
-    motor_a.turn(-LEFT_RIGHT_POWER, STEP_DEGREES)
+    motor_a.turn(LEFT_RIGHT_POWER, LEFT_RIGHT_STEP)
     time.sleep(1)
 
 
 def moveRight():
-    motor_a.turn(LEFT_RIGHT_POWER, STEP_DEGREES)
+    motor_a.turn(-LEFT_RIGHT_POWER, LEFT_RIGHT_STEP)
     time.sleep(1)
 
 
 def moveUp():
-    motor_b.turn(-UP_DOWN_POWER, STEP_DEGREES)
+    motor_b.turn(UP_DOWN_POWER, UP_DOWN_STEP)
     time.sleep(1)
 
 
 def moveDown():
-    motor_b.turn(UP_DOWN_POWER, STEP_DEGREES)
+    motor_b.turn(-UP_DOWN_POWER, UP_DOWN_STEP)
     time.sleep(1)
 
 
