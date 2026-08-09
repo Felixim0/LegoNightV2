@@ -177,6 +177,10 @@ def run(motors_enabled: bool = True) -> None:
     last_h_dispatch = 0.0
     last_v_dispatch = 0.0
 
+    # Track previous in-box state per axis to detect the outside→inside transition
+    prev_h_in_box = False
+    prev_v_in_box = False
+
     last_face         = None   # (x, y, w, h) of the most recently detected face
     last_manual_input = 0.0    # timestamp of last WASD key press (for HUD indicator)
 
@@ -285,6 +289,20 @@ def run(motors_enabled: bool = True) -> None:
             h_in_box    = (x <= frame_cx <= x + w)
             v_in_box    = (y <= frame_cy <= y + h)
             in_face_box = h_in_box and v_in_box and cam_mode == 'TRACKING'
+
+            # On the frame we first enter the box, wipe queued fast-approach steps
+            if h_in_box and not prev_h_in_box:
+                while not _hqueue.empty():
+                    try: _hqueue.get_nowait()
+                    except queue.Empty: break
+                with _display_lock: _h_display.clear()
+            if v_in_box and not prev_v_in_box:
+                while not _vqueue.empty():
+                    try: _vqueue.get_nowait()
+                    except queue.Empty: break
+                with _display_lock: _v_display.clear()
+            prev_h_in_box = h_in_box
+            prev_v_in_box = v_in_box
 
             # Manage firing countdown
             if in_face_box:
