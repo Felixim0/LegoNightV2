@@ -1,0 +1,217 @@
+"""
+camera.py — Face detection, HUD overlay, and motor dispatch.
+
+macOS requires cv2.imshow() on the main thread, so run() is blocking.
+Motor commands go through two persistent queues (one per axis) so the
+camera loop is NEVER stalled — horizontal and vertical can fire together.
+"""
+
+import queue
+import threading
+import time
+
+import cv2
+
+from motors import moveDown, moveLeft, moveRight, moveUp
+
+# ----------------------------
+# Settings
+# ----------------------------
+CAMERA_INDEX           = 0
+PRINT_HZ               = 0.5    # terminal log lines per second
+OVERLAY_ALPHA          = 0.35   # red overlay strength (0 = none, 1 = fully red)
+OVERLAY_UPDATE_SECONDS = 2      # how often the on-screen TARGET label refreshes
+TOLERANCE              = 100    # dead-zone radius in pixels around centre
+WINDOW_NAME            = 'Guardian Vision V2'
+UI_SCALE               = 1.4
+COUNTDOWN_START        = 10     # seconds
+
+BOX_COLOR     = (0, 255, 255)   # yellow face box (BGR)
+BOX_THICKNESS = 2
+
+# ----------------------------
+# Non-blocking motor queues
+# ----------------------------
+# Two queues: horizontal and vertical.  Each has a single worker thread so
+# X and Y motors can run at the same time without blocking each other or
+# the camera loop.  maxsize=1 means we always act on the LATEST position —
+# stale commands are replaced, never pile up.
+
+_hqueue: queue.Queue = queue.Queue(maxsize=1)
+_vqueue: queue.Queue = queue.Queue(maxsize=1)
+
+
+def _worker(q: queue.Queue) -> None:
+    while True:
+        action = q.get()
+        if action is None:   # shutdown signal
+            break
+        action()
+
+
+def _dispatch(action, q: queue.Queue) -> None:
+    """Put action into q without blocking. Replaces stale command if full."""
+    try:
+        q.put_nowait(action)
+    except queue.Full:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(action)
+        except queue.Full:
+            pass
+
+
+# ----------------------------
+# Main camera function
+# ----------------------------
+
+def run() -> None:
+    """Run the camera + HUD loop. Must be called from the main thread on macOS."""
+
+    # Start the two motor worker threads before touching the camera
+    threading.Thread(target=_worker, args=(_hqueue,), daemon=True, name='motor-h').start()
+    threading.Thread(target=_worker, args=(_vqueue,), daemon=True, name='motor-v').start()
+
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    if not cap.isOpened():
+        print('[camera] ERROR: could not open webcam.')
+        return
+
+    detector = cv2.CascadeClassifier(
+        cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    )
+
+    def put(text, pos, scale=1.0, thickness=2, color=(255, 255, 255)):
+        cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
+                    scale * UI_SCALE, color, max(2, int(thickness * UI_SCALE)), cv2.LINE_AA)
+
+    print_interval          = 1 / PRINT_HZ
+    last_print_time         = 0.0
+    last_instruction_update = 0.0
+
+    current_instruction = 'NO TARGET'
+    display_instruction = 'NO TARGET'
+    instruction_history = []
+    countdown_start     = time.time()
+
+    print(f'[camera] {WINDOW_NAME} running — press Q to quit.')
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            print('[camera] Could not read from webcam.')
+            break
+
+        now = time.time()
+        frame_h, frame_w = frame.shape[:2]
+        frame_cx = frame_w // 2
+        frame_cy = frame_h // 2
+
+        # --- Full-screen red overlay ---
+        red_overlay = frame.copy()
+        cv2.rectangle(red_overlay, (0, 0), (frame_w, frame_h), (0, 0, 255), -1)
+        cv2.addWeighted(red_overlay, OVERLAY_ALPHA, frame, 1 - OVERLAY_ALPHA, 0, frame)
+
+        # --- Face detection ---
+        grey  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = detector.detectMultiScale(
+            grey, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+        )
+
+        terminal_message = 'NO TARGET'
+        terminal_offset  = 'offset=(n/a)'
+
+        if len(faces) > 0:
+            # Track only the largest face
+            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+
+            cv2.rectangle(frame, (x, y), (x + w, y + h), BOX_COLOR, BOX_THICKNESS)
+
+            face_cx = x + w // 2
+            face_cy = y + h // 2
+            dx = face_cx - frame_cx
+            dy = face_cy - frame_cy
+
+            x_instruction = None
+            y_instruction = None
+
+            # Both axes checked independently — both can fire at the same time
+            if dx < -TOLERANCE:
+                x_instruction = 'LEFT'
+                _dispatch(moveLeft, _hqueue)
+            elif dx > TOLERANCE:
+                x_instruction = 'RIGHT'
+                _dispatch(moveRight, _hqueue)
+
+            if dy < -TOLERANCE:
+                y_instruction = 'UP'
+                _dispatch(moveUp, _vqueue)
+            elif dy > TOLERANCE:
+                y_instruction = 'DOWN'
+                _dispatch(moveDown, _vqueue)
+
+            # Pick the dominant axis for the on-screen label
+            if x_instruction is None and y_instruction is None:
+                current_instruction = 'ACQUIRED'
+            elif x_instruction and y_instruction:
+                current_instruction = x_instruction if abs(dx) >= abs(dy) else y_instruction
+            else:
+                current_instruction = x_instruction or y_instruction
+
+            terminal_message = current_instruction
+            terminal_offset  = f'offset=({dx}, {dy})'
+        else:
+            current_instruction = 'NO TARGET'
+
+        # --- Rate-limited terminal log ---
+        if now - last_print_time >= print_interval:
+            print(f'{terminal_message} | '
+                  f'frame_centre=({frame_cx}, {frame_cy}) | '
+                  f'{terminal_offset}')
+            last_print_time = now
+
+        # --- Refresh displayed instruction every N seconds ---
+        if now - last_instruction_update >= OVERLAY_UPDATE_SECONDS:
+            display_instruction = current_instruction
+            instruction_history.append(f'{current_instruction} {terminal_offset}')
+            instruction_history = instruction_history[-5:]
+            last_instruction_update = now
+
+        # --- White centre crosshair ---
+        cs = 20
+        cv2.line(frame, (frame_cx - cs, frame_cy), (frame_cx + cs, frame_cy), (255, 255, 255), 2)
+        cv2.line(frame, (frame_cx, frame_cy - cs), (frame_cx, frame_cy + cs), (255, 255, 255), 2)
+
+        # --- HUD text ---
+
+        # Top-centre: SCAN MODE
+        scan_text = 'SCAN MODE'
+        (tw, _), _ = cv2.getTextSize(scan_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0 * UI_SCALE, 2)
+        put(scan_text, ((frame_w - tw) // 2, 40))
+
+        # Top-left: current target instruction
+        put(f'TARGET: {display_instruction}', (20, 90))
+
+        # Mid-left: last 5 instructions with offsets
+        hy = frame_h // 2 - int(90 * UI_SCALE)
+        for i, entry in enumerate(instruction_history):
+            put(entry, (20, hy + i * int(35 * UI_SCALE)), scale=0.7)
+
+        # Bottom-left: countdown
+        remaining = max(0, COUNTDOWN_START - int(now - countdown_start))
+        put(str(remaining), (20, frame_h - 30), scale=2.0, thickness=3)
+
+        cv2.imshow(WINDOW_NAME, frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # --- Cleanup ---
+    cap.release()
+    cv2.destroyAllWindows()
+    _hqueue.put(None)
+    _vqueue.put(None)
+    print('[camera] Closed.')
