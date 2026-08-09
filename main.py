@@ -1,14 +1,12 @@
 """
 main.py — Entry point.
 
-macOS requires OpenCV windows to live on the main thread, so camera.run()
-is called directly here and blocks until the user quits.
-
-Any background work (motors, networking, etc.) should be started as
-daemon threads BEFORE calling camera.run(), exactly like the example
-worker thread below.
+Usage:
+  python main.py                  # normal run, motors enabled
+  python main.py motors=disabled  # camera-only, no motor commands sent
 """
 
+import sys
 import threading
 
 import camera
@@ -19,18 +17,20 @@ import camera
 # ---------------------------------------------------------------------------
 def _background_worker():
     """Placeholder for motor controllers or other logic."""
-    # This runs concurrently with the camera preview.
 
 
 def main():
-    # Start background workers first
-    threading.Thread(target=_background_worker, daemon=True, name="worker").start()
+    motors_enabled = 'motors=disabled' not in sys.argv
 
-    # Hand control to the camera loop (must stay on the main thread on macOS)
+    if not motors_enabled:
+        print('[main] Motors DISABLED (camera-only mode).')
+
+    threading.Thread(target=_background_worker, daemon=True, name='worker').start()
+
     try:
-        camera.run()
+        camera.run(motors_enabled=motors_enabled)
     except KeyboardInterrupt:
-        print("\n[main] Shutting down...")
+        print('\n[main] Shutting down...')
 
 
 if __name__ == "__main__":
