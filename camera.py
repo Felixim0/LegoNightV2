@@ -36,7 +36,8 @@ UI_SCALE               = 1.4
 COUNTDOWN_START        = 10     # seconds
 DISPATCH_INTERVAL      = 0.4    # minimum seconds between queue additions per axis
 
-BOX_COLOR     = (0, 255, 255)   # yellow face box (BGR)
+BOX_COLOR       = (0, 255, 255)   # yellow — live detected face (BGR)
+GHOST_BOX_COLOR = (0, 140, 255)   # orange — last known position, face not currently detected
 BOX_THICKNESS = 2
 
 # ----------------------------
@@ -158,6 +159,8 @@ def run(motors_enabled: bool = True) -> None:
     last_h_dispatch = 0.0
     last_v_dispatch = 0.0
 
+    last_face = None   # (x, y, w, h) of the most recently detected face
+
     mode_label = '' if motors_enabled else ' (SIM)'
     font       = cv2.FONT_HERSHEY_SIMPLEX
     qscale     = 0.6 * UI_SCALE
@@ -222,11 +225,21 @@ def run(motors_enabled: bool = True) -> None:
         terminal_offset  = 'offset=(n/a)'
 
         if len(faces) > 0:
-            # Track only the largest face
+            # Live detection — update last known position
             x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-
+            last_face = (x, y, w, h)
             cv2.rectangle(frame, (x, y), (x + w, y + h), BOX_COLOR, BOX_THICKNESS)
+            face_live = True
+        elif last_face is not None:
+            # No detection this frame — use last known position
+            x, y, w, h = last_face
+            cv2.rectangle(frame, (x, y), (x + w, y + h), GHOST_BOX_COLOR, BOX_THICKNESS)
+            face_live = False
+        else:
+            face_live = False
 
+        if last_face is not None:
+            x, y, w, h = last_face
             face_cx = x + w // 2
             face_cy = y + h // 2
             dx = face_cx - frame_cx
@@ -260,7 +273,7 @@ def run(motors_enabled: bool = True) -> None:
 
             # Pick the dominant axis for the on-screen label
             if x_instruction is None and y_instruction is None:
-                current_instruction = 'ACQUIRED'
+                current_instruction = 'ACQUIRED' if face_live else 'LAST KNOWN'
             elif x_instruction and y_instruction:
                 current_instruction = x_instruction if abs(dx) >= abs(dy) else y_instruction
             else:
