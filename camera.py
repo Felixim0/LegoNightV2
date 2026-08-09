@@ -30,11 +30,15 @@ CAMERA_INDEX           = 0
 PRINT_HZ               = 0.5    # terminal log lines per second
 OVERLAY_ALPHA          = 0.35   # red overlay strength (0 = none, 1 = fully red)
 OVERLAY_UPDATE_SECONDS = 2      # how often the on-screen TARGET label refreshes
-TOLERANCE              = 100    # dead-zone radius in pixels around centre
+TOLERANCE              = 15     # dead-zone radius in pixels — small so camera aims for exact face centre
 WINDOW_NAME            = 'Guardian Vision V2'
 UI_SCALE               = 1.4
 COUNTDOWN_START        = 10     # seconds
 DISPATCH_INTERVAL      = 0.4    # minimum seconds between queue additions per axis
+
+GHOST_MAX_ACTIONS    = 4    # motor actions allowed on last-known position before ghost expires
+SENTRY_STEPS_PER_DIR = 5    # steps in each direction during sentry sweep before reversing
+SENTRY_INTERVAL      = 1.2  # seconds between sentry motor commands
 
 BOX_COLOR       = (0, 255, 255)   # yellow — live detected face (BGR)
 GHOST_BOX_COLOR = (0, 140, 255)   # orange — last known position, face not currently detected
@@ -159,8 +163,15 @@ def run(motors_enabled: bool = True) -> None:
     last_h_dispatch = 0.0
     last_v_dispatch = 0.0
 
-    last_face = None   # (x, y, w, h) of the most recently detected face
-    last_manual_input = 0.0  # timestamp of last arrow key press (for HUD indicator)
+    last_face         = None   # (x, y, w, h) of the most recently detected face
+    last_manual_input = 0.0    # timestamp of last WASD key press (for HUD indicator)
+
+    # Camera mode state machine
+    cam_mode      = 'TRACKING'  # 'TRACKING' | 'GHOST' | 'SENTRY'
+    ghost_actions = 0           # motor dispatches used while ghost box is shown
+    sentry_dir    = 'LEFT'      # current sentry sweep direction
+    sentry_steps  = 0           # steps taken in current direction
+    last_sentry   = 0.0         # last sentry dispatch timestamp
 
     mode_label = '' if motors_enabled else ' (SIM)'
     font       = cv2.FONT_HERSHEY_SIMPLEX
@@ -226,20 +237,25 @@ def run(motors_enabled: bool = True) -> None:
         terminal_offset  = 'offset=(n/a)'
 
         if len(faces) > 0:
-            # Live detection — update last known position
+            # Live face detected
             x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
             last_face = (x, y, w, h)
+            if cam_mode != 'TRACKING':
+                cam_mode      = 'TRACKING'
+                ghost_actions = 0
             cv2.rectangle(frame, (x, y), (x + w, y + h), BOX_COLOR, BOX_THICKNESS)
             face_live = True
-        elif last_face is not None:
-            # No detection this frame — use last known position
-            x, y, w, h = last_face
-            cv2.rectangle(frame, (x, y), (x + w, y + h), GHOST_BOX_COLOR, BOX_THICKNESS)
-            face_live = False
         else:
+            if cam_mode == 'TRACKING':
+                # Just lost the face — start ghost countdown
+                cam_mode      = 'GHOST'
+                ghost_actions = 0
+            if cam_mode == 'GHOST' and last_face is not None:
+                x, y, w, h = last_face
+                cv2.rectangle(frame, (x, y), (x + w, y + h), GHOST_BOX_COLOR, BOX_THICKNESS)
             face_live = False
 
-        if last_face is not None:
+        if cam_mode in ('TRACKING', 'GHOST') and last_face is not None:
             x, y, w, h = last_face
             face_cx = x + w // 2
             face_cy = y + h // 2
@@ -248,31 +264,56 @@ def run(motors_enabled: bool = True) -> None:
 
             x_instruction = None
             y_instruction = None
+            h_dispatched  = False
+            v_dispatched  = False
 
-            # Both axes checked independently — both queues run in parallel
             if dx < -TOLERANCE:
                 x_instruction = 'LEFT'
                 if now - last_h_dispatch >= DISPATCH_INTERVAL:
                     _dispatch(moveLeft, _hqueue, _h_display, motors_enabled)
                     last_h_dispatch = now
+                    h_dispatched = True
             elif dx > TOLERANCE:
                 x_instruction = 'RIGHT'
                 if now - last_h_dispatch >= DISPATCH_INTERVAL:
                     _dispatch(moveRight, _hqueue, _h_display, motors_enabled)
                     last_h_dispatch = now
+                    h_dispatched = True
+            else:
+                while not _hqueue.empty():
+                    try: _hqueue.get_nowait()
+                    except queue.Empty: break
+                with _display_lock: _h_display.clear()
 
             if dy < -TOLERANCE:
                 y_instruction = 'UP'
                 if now - last_v_dispatch >= DISPATCH_INTERVAL:
                     _dispatch(moveUp, _vqueue, _v_display, motors_enabled)
                     last_v_dispatch = now
+                    v_dispatched = True
             elif dy > TOLERANCE:
                 y_instruction = 'DOWN'
                 if now - last_v_dispatch >= DISPATCH_INTERVAL:
                     _dispatch(moveDown, _vqueue, _v_display, motors_enabled)
                     last_v_dispatch = now
+                    v_dispatched = True
+            else:
+                while not _vqueue.empty():
+                    try: _vqueue.get_nowait()
+                    except queue.Empty: break
+                with _display_lock: _v_display.clear()
 
-            # Pick the dominant axis for the on-screen label
+            # Count ghost actions and expire ghost box after limit
+            if cam_mode == 'GHOST':
+                ghost_actions += (1 if h_dispatched else 0) + (1 if v_dispatched else 0)
+                if ghost_actions >= GHOST_MAX_ACTIONS:
+                    cam_mode  = 'SENTRY'
+                    last_face = None
+                    for q in (_hqueue, _vqueue):
+                        while not q.empty():
+                            try: q.get_nowait()
+                            except queue.Empty: break
+
             if x_instruction is None and y_instruction is None:
                 current_instruction = 'ACQUIRED' if face_live else 'LAST KNOWN'
             elif x_instruction and y_instruction:
@@ -282,6 +323,19 @@ def run(motors_enabled: bool = True) -> None:
 
             terminal_message = current_instruction
             terminal_offset  = f'offset=({dx}, {dy})'
+
+        elif cam_mode == 'SENTRY':
+            # Sweep left and right slowly until a face reappears
+            if now - last_sentry >= SENTRY_INTERVAL:
+                action = moveLeft if sentry_dir == 'LEFT' else moveRight
+                _dispatch(action, _hqueue, _h_display, motors_enabled)
+                last_sentry   = now
+                sentry_steps += 1
+                if sentry_steps >= SENTRY_STEPS_PER_DIR:
+                    sentry_steps = 0
+                    sentry_dir   = 'RIGHT' if sentry_dir == 'LEFT' else 'LEFT'
+            current_instruction = 'SENTRY'
+
         else:
             current_instruction = 'NO TARGET'
 
@@ -310,6 +364,9 @@ def run(motors_enabled: bool = True) -> None:
         scan_text = 'SCAN MODE'
         (tw, _), _ = cv2.getTextSize(scan_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0 * UI_SCALE, 2)
         put(scan_text, ((frame_w - tw) // 2, 40))
+
+        # Top-centre below title: WASD hint
+        put('W/A/S/D: manual control   Q: quit', ((frame_w - tw) // 2 - 60, 70), scale=0.5, color=(180, 180, 180))
 
         # Top-left: current target instruction
         put(f'TARGET: {display_instruction}', (20, 90))
