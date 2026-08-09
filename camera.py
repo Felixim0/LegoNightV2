@@ -41,6 +41,8 @@ OVERLAY_ALPHA          = 0.35   # red overlay strength (0 = none, 1 = fully red)
 OVERLAY_UPDATE_SECONDS = 2      # how often the on-screen TARGET label refreshes
 TOLERANCE              = 15     # dead-zone radius in pixels — small so camera aims for exact face centre
 WINDOW_NAME            = 'Guardian Vision V2'
+WINDOW_W               = 1700   # preview window width  — change to taste
+WINDOW_H               = 1000 # preview window height — change to taste
 UI_SCALE               = 1.4
 COUNTDOWN_START        = 6      # seconds for 'firing in' countdown when crosshair is inside face box
 DISPATCH_INTERVAL      = 0.1    # minimum seconds between queue additions per axis
@@ -207,6 +209,9 @@ def run(motors_enabled: bool = True) -> None:
             put('--', (x, y), scale=0.6)
 
     print(f'[camera] {WINDOW_NAME} running — press Q to quit.')
+
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    _window_sized = False   # resize after first imshow (window must exist first)
 
     while True:
         ok, frame = cap.read()
@@ -440,7 +445,12 @@ def run(motors_enabled: bool = True) -> None:
             remaining = max(0.0, COUNTDOWN_START - (now - fire_countdown_start))
             put(f'firing in {remaining:.0f}', (20, frame_h - 30), scale=3.5, thickness=4, color=(0, 0, 255))
 
-        cv2.imshow(WINDOW_NAME, frame)
+        # Scale frame up to fill the screen before displaying
+        display = cv2.resize(frame, (WINDOW_W, WINDOW_H), interpolation=cv2.INTER_LINEAR)
+        cv2.imshow(WINDOW_NAME, display)
+        if not _window_sized:
+            cv2.resizeWindow(WINDOW_NAME, WINDOW_W, WINDOW_H)
+            _window_sized = True
 
         # --- Key handling ---
         key = cv2.waitKey(1) & 0xFF
