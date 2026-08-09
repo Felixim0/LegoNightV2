@@ -12,6 +12,15 @@ import time
 
 import cv2
 
+# MediaPipe gives far better accuracy than Haar cascades.
+# Install once: pip install mediapipe
+try:
+    import mediapipe as mp
+    _mp_face_detection = mp.solutions.face_detection
+    _MEDIAPIPE = True
+except ImportError:
+    _MEDIAPIPE = False
+
 from motors import moveDown, moveLeft, moveRight, moveUp, shutdown
 
 # ----------------------------
@@ -117,9 +126,20 @@ def run(motors_enabled: bool = True) -> None:
         print('[camera] ERROR: could not open webcam.')
         return
 
-    detector = cv2.CascadeClassifier(
-        cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-    )
+    if _MEDIAPIPE:
+        # model_selection=1 — full-range model, accurate up to ~5 m
+        detector = _mp_face_detection.FaceDetection(
+            model_selection=1, min_detection_confidence=0.6
+        )
+        detector_type = 'mediapipe'
+        print('[camera] Using MediaPipe face detector (high accuracy).')
+    else:
+        detector = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        )
+        detector_type = 'haar'
+        print('[camera] MediaPipe not installed — falling back to Haar cascade.')
+        print('[camera] For better accuracy run: pip install mediapipe')
 
     def put(text, pos, scale=1.0, thickness=2, color=(255, 255, 255)):
         cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
@@ -137,6 +157,27 @@ def run(motors_enabled: bool = True) -> None:
     # Per-axis throttle: track when we last added to each queue
     last_h_dispatch = 0.0
     last_v_dispatch = 0.0
+
+    mode_label = '' if motors_enabled else ' (SIM)'
+    font       = cv2.FONT_HERSHEY_SIMPLEX
+    qscale     = 0.6 * UI_SCALE
+    qthick     = max(2, int(2 * UI_SCALE))
+    GREEN      = (0, 220, 0)
+
+    def draw_queue_line(label, current, pending, y):
+        """Render one motor queue row: label (white), current (green), pending (white)."""
+        (lw, _), _ = cv2.getTextSize(label, font, qscale, qthick)
+        put(label, (20, y), scale=0.6)
+        x = 20 + lw + 6
+        if current:
+            cv2.putText(frame, current, (x, y), font, qscale, GREEN, qthick, cv2.LINE_AA)
+            (cw, _), _ = cv2.getTextSize(current, font, qscale, qthick)
+            x += cw + 6
+        if pending:
+            sep = '  >  ' if current else ''
+            put(sep + ' > '.join(pending), (x, y), scale=0.6)
+        elif not current:
+            put('--', (x, y), scale=0.6)
 
     print(f'[camera] {WINDOW_NAME} running — press Q to quit.')
 
@@ -157,10 +198,25 @@ def run(motors_enabled: bool = True) -> None:
         cv2.addWeighted(red_overlay, OVERLAY_ALPHA, frame, 1 - OVERLAY_ALPHA, 0, frame)
 
         # --- Face detection ---
-        grey  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = detector.detectMultiScale(
-            grey, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
-        )
+        if detector_type == 'mediapipe':
+            rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = detector.process(rgb)
+            faces   = []
+            if results.detections:
+                for det in results.detections:
+                    bb = det.location_data.relative_bounding_box
+                    fx = max(0, int(bb.xmin * frame_w))
+                    fy = max(0, int(bb.ymin * frame_h))
+                    fw = int(bb.width  * frame_w)
+                    fh = int(bb.height * frame_h)
+                    faces.append((fx, fy, fw, fh))
+        else:
+            grey  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            eq    = cv2.equalizeHist(grey)
+            found = detector.detectMultiScale(
+                eq, scaleFactor=1.05, minNeighbors=4, minSize=(40, 40)
+            )
+            faces = list(found) if len(found) else []
 
         terminal_message = 'NO TARGET'
         terminal_offset  = 'offset=(n/a)'
@@ -256,30 +312,6 @@ def run(motors_enabled: bool = True) -> None:
             h_pending = list(_h_display)
             v_pending = list(_v_display)
 
-        mode_label = '' if motors_enabled else ' (SIM)'
-        font  = cv2.FONT_HERSHEY_SIMPLEX
-        qscale = 0.6 * UI_SCALE
-        qthick = max(2, int(2 * UI_SCALE))
-        GREEN = (0, 220, 0)
-
-        def draw_queue_line(label, current, pending, y):
-            # Label in white
-            (lw, _), _ = cv2.getTextSize(label, font, qscale, qthick)
-            put(label, (20, y), scale=0.6)
-            x = 20 + lw + 6
-            # Currently executing item in green
-            if current:
-                cv2.putText(frame, current, (x, y), font, qscale, GREEN, qthick, cv2.LINE_AA)
-                (cw, _), _ = cv2.getTextSize(current, font, qscale, qthick)
-                x += cw + 6
-            # Pending items in white
-            if pending:
-                sep = '  >  ' if current else ''
-                pend_str = sep + ' > '.join(pending)
-                put(pend_str, (x, y), scale=0.6)
-            elif not current:
-                put('--', (x, y), scale=0.6)
-
         draw_queue_line(f'PAN{mode_label}:',  h_current, h_pending, frame_h - 110)
         draw_queue_line(f'TILT{mode_label}:', v_current, v_pending, frame_h - 75)
 
@@ -303,9 +335,12 @@ def run(motors_enabled: bool = True) -> None:
 
     cap.release()
     cv2.destroyAllWindows()
+    if detector_type == 'mediapipe':
+        detector.close()
 
     # Stop motors before sending shutdown signal to workers
-    shutdown()
+    if motors_enabled:
+        shutdown()
 
     _hqueue.put(None)
     _vqueue.put(None)
