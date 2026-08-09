@@ -42,8 +42,8 @@ OVERLAY_UPDATE_SECONDS = 2      # how often the on-screen TARGET label refreshes
 TOLERANCE              = 15     # dead-zone radius in pixels — small so camera aims for exact face centre
 WINDOW_NAME            = 'Guardian Vision V2'
 UI_SCALE               = 1.4
-COUNTDOWN_START        = 10     # seconds
-DISPATCH_INTERVAL      = 0.4    # minimum seconds between queue additions per axis
+COUNTDOWN_START        = 6      # seconds for 'firing in' countdown when crosshair is inside face box
+DISPATCH_INTERVAL      = 0.1    # minimum seconds between queue additions per axis
 
 GHOST_MAX_ACTIONS    = 4    # motor actions allowed on last-known position before ghost expires
 SENTRY_STEPS_PER_DIR = 5    # steps in each direction during sentry sweep before reversing
@@ -167,7 +167,9 @@ def run(motors_enabled: bool = True) -> None:
     current_instruction = 'NO TARGET'
     display_instruction = 'NO TARGET'
     instruction_history = []
-    countdown_start     = time.time()
+
+    fire_countdown_start = None   # set when crosshair enters the face box; None = not counting
+    in_face_box          = False  # updated each frame; drives overlay colour + countdown
 
     # Per-axis throttle: track when we last added to each queue
     last_h_dispatch = 0.0
@@ -217,10 +219,12 @@ def run(motors_enabled: bool = True) -> None:
         frame_cx = frame_w // 2
         frame_cy = frame_h // 2
 
-        # --- Full-screen red overlay ---
-        red_overlay = frame.copy()
-        cv2.rectangle(red_overlay, (0, 0), (frame_w, frame_h), (0, 0, 255), -1)
-        cv2.addWeighted(red_overlay, OVERLAY_ALPHA, frame, 1 - OVERLAY_ALPHA, 0, frame)
+        # --- Full-screen overlay: green normally, red when crosshair is inside the face box ---
+        # Uses last frame's in_face_box (one frame behind — imperceptible)
+        _overlay = frame.copy()
+        _overlay_color = (0, 0, 255) if in_face_box else (0, 200, 0)  # BGR: red | green
+        cv2.rectangle(_overlay, (0, 0), (frame_w, frame_h), _overlay_color, -1)
+        cv2.addWeighted(_overlay, OVERLAY_ALPHA, frame, 1 - OVERLAY_ALPHA, 0, frame)
 
         # --- Face detection ---
         if detector_type == 'mediapipe':
@@ -273,8 +277,16 @@ def run(motors_enabled: bool = True) -> None:
             dy = face_cy - frame_cy
 
             # Is the crosshair already inside the face box? Use slower power + brake if so.
-            h_in_box = (x <= frame_cx <= x + w)
-            v_in_box = (y <= frame_cy <= y + h)
+            h_in_box    = (x <= frame_cx <= x + w)
+            v_in_box    = (y <= frame_cy <= y + h)
+            in_face_box = h_in_box and v_in_box and cam_mode == 'TRACKING'
+
+            # Manage firing countdown
+            if in_face_box:
+                if fire_countdown_start is None:
+                    fire_countdown_start = now
+            else:
+                fire_countdown_start = None
             h_power  = LEFT_RIGHT_POWER_WHEN_IN_FACE_BOX if h_in_box else LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX
             v_power  = UP_DOWN_POWER_WHEN_IN_FACE_BOX    if v_in_box else UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX
             h_step   = LEFT_RIGHT_STEP_WHEN_IN_FACE_BOX  if h_in_box else LEFT_RIGHT_STEP_WHEN_NOT_IN_FACE_BOX
@@ -352,6 +364,8 @@ def run(motors_enabled: bool = True) -> None:
             terminal_offset  = f'offset=({dx}, {dy})'
 
         elif cam_mode == 'SENTRY':
+            in_face_box          = False
+            fire_countdown_start = None
             # Sweep left and right slowly until a face reappears
             if now - last_sentry >= SENTRY_INTERVAL:
                 action = moveLeft if sentry_dir == 'LEFT' else moveRight
@@ -364,7 +378,9 @@ def run(motors_enabled: bool = True) -> None:
             current_instruction = 'SENTRY'
 
         else:
-            current_instruction = 'NO TARGET'
+            in_face_box          = False
+            fire_countdown_start = None
+            current_instruction  = 'NO TARGET'
 
         # --- Rate-limited terminal log ---
         if now - last_print_time >= print_interval:
@@ -419,9 +435,10 @@ def run(motors_enabled: bool = True) -> None:
         draw_queue_line(f'PAN{mode_label}:',  h_current, h_pending, frame_h - 110)
         draw_queue_line(f'TILT{mode_label}:', v_current, v_pending, frame_h - 75)
 
-        # Bottom-left: countdown
-        remaining = max(0, COUNTDOWN_START - int(now - countdown_start))
-        put(str(remaining), (20, frame_h - 30), scale=2.0, thickness=3)
+        # Bottom-left: firing countdown (only when crosshair is locked inside face box)
+        if fire_countdown_start is not None:
+            remaining = max(0.0, COUNTDOWN_START - (now - fire_countdown_start))
+            put(f'firing in {remaining:.0f}', (20, frame_h - 30), scale=3.5, thickness=4, color=(0, 0, 255))
 
         cv2.imshow(WINDOW_NAME, frame)
 
