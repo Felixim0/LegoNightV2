@@ -12,7 +12,7 @@ import time
 
 import cv2
 
-from motors import moveDown, moveLeft, moveRight, moveUp
+from motors import moveDown, moveLeft, moveRight, moveUp, shutdown
 
 # ----------------------------
 # Settings
@@ -34,11 +34,18 @@ BOX_THICKNESS = 2
 # ----------------------------
 # Two queues: horizontal and vertical.  Each has a single worker thread so
 # X and Y motors can run at the same time without blocking each other or
-# the camera loop.  maxsize=1 means we always act on the LATEST position —
-# stale commands are replaced, never pile up.
+# the camera loop.
+#
+# Queue behaviour:
+#   - Holds up to MAX_QUEUE_SIZE pending commands.
+#   - If a new command arrives and the queue is already full, the entire
+#     queue is wiped and replaced with just the latest instruction.
+#     This prevents the camera chasing a stale path after a big movement.
 
-_hqueue: queue.Queue = queue.Queue(maxsize=1)
-_vqueue: queue.Queue = queue.Queue(maxsize=1)
+MAX_QUEUE_SIZE = 4
+
+_hqueue: queue.Queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+_vqueue: queue.Queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
 
 
 def _worker(q: queue.Queue) -> None:
@@ -50,18 +57,18 @@ def _worker(q: queue.Queue) -> None:
 
 
 def _dispatch(action, q: queue.Queue) -> None:
-    """Put action into q without blocking. Replaces stale command if full."""
+    """Non-blocking put. Wipes the queue and restarts if it hits MAX_QUEUE_SIZE."""
+    if q.full():
+        # Queue backed up — discard stale path and start fresh
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
     try:
         q.put_nowait(action)
     except queue.Full:
-        try:
-            q.get_nowait()
-        except queue.Empty:
-            pass
-        try:
-            q.put_nowait(action)
-        except queue.Full:
-            pass
+        pass  # safety net for race conditions
 
 
 # ----------------------------
@@ -210,8 +217,20 @@ def run() -> None:
             break
 
     # --- Cleanup ---
+    # Drain queues first so no stale commands run after quit
+    for q in (_hqueue, _vqueue):
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+
     cap.release()
     cv2.destroyAllWindows()
+
+    # Stop motors before sending shutdown signal to workers
+    shutdown()
+
     _hqueue.put(None)
     _vqueue.put(None)
     print('[camera] Closed.')
