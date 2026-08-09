@@ -160,6 +160,7 @@ def run(motors_enabled: bool = True) -> None:
     last_v_dispatch = 0.0
 
     last_face = None   # (x, y, w, h) of the most recently detected face
+    last_manual_input = 0.0  # timestamp of last arrow key press (for HUD indicator)
 
     mode_label = '' if motors_enabled else ' (SIM)'
     font       = cv2.FONT_HERSHEY_SIMPLEX
@@ -313,6 +314,12 @@ def run(motors_enabled: bool = True) -> None:
         # Top-left: current target instruction
         put(f'TARGET: {display_instruction}', (20, 90))
 
+        # Top-right: manual control indicator (shown for 1 s after last key press)
+        if now - last_manual_input < 1.0:
+            manual_text = 'MANUAL CONTROL'
+            (mw, _), _ = cv2.getTextSize(manual_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7 * UI_SCALE, 2)
+            put(manual_text, (frame_w - mw - 20, 40), scale=0.7, color=(0, 220, 255))
+
         # Mid-left: last 5 instructions with offsets
         hy = frame_h // 2 - int(90 * UI_SCALE)
         for i, entry in enumerate(instruction_history):
@@ -334,8 +341,36 @@ def run(motors_enabled: bool = True) -> None:
 
         cv2.imshow(WINDOW_NAME, frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        # --- Key handling ---
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('q'):
             break
+
+        def _clear_and_dispatch(action, q, display_list):
+            """Flush queue and insert manual command at front (highest priority)."""
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+            with _display_lock:
+                display_list.clear()
+            _dispatch(action, q, display_list, motors_enabled)
+
+        # WASD manual control
+        if key == ord('a'):
+            _clear_and_dispatch(moveLeft,  _hqueue, _h_display)
+            last_manual_input = now
+        elif key == ord('d'):
+            _clear_and_dispatch(moveRight, _hqueue, _h_display)
+            last_manual_input = now
+        elif key == ord('w'):
+            _clear_and_dispatch(moveUp,    _vqueue, _v_display)
+            last_manual_input = now
+        elif key == ord('s'):
+            _clear_and_dispatch(moveDown,  _vqueue, _v_display)
+            last_manual_input = now
 
     # --- Cleanup ---
     # Drain queues first so no stale commands run after quit
