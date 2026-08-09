@@ -6,6 +6,7 @@ Motor commands go through two persistent queues (one per axis) so the
 camera loop is NEVER stalled — horizontal and vertical can fire together.
 """
 
+import functools
 import queue
 import threading
 import time
@@ -21,7 +22,11 @@ try:
 except ImportError:
     _MEDIAPIPE = False
 
-from motors import moveDown, moveLeft, moveRight, moveUp, shutdown
+from motors import (LEFT_RIGHT_POWER_WHEN_IN_FACE_BOX,
+                    LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX,
+                    UP_DOWN_POWER_WHEN_IN_FACE_BOX,
+                    UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX, moveDown, moveLeft,
+                    moveRight, moveUp, shutdown)
 
 # ----------------------------
 # Settings
@@ -88,7 +93,8 @@ def _worker(q: queue.Queue, display_list: list, current_ref: list) -> None:
 
 def _dispatch(action, q: queue.Queue, display_list: list, enabled: bool) -> None:
     """Non-blocking put. Wipes the queue and restarts if it hits MAX_QUEUE_SIZE."""
-    display_name = action.__name__.replace('move', '').upper()  # e.g. moveLeft -> LEFT
+    # getattr handles functools.partial (no __name__) gracefully
+    display_name = getattr(action, '__name__', 'move').replace('move', '').upper()
 
     if not enabled:
         _dn = display_name
@@ -262,6 +268,18 @@ def run(motors_enabled: bool = True) -> None:
             dx = face_cx - frame_cx
             dy = face_cy - frame_cy
 
+            # Is the crosshair already inside the face box? Use slower power if so.
+            h_in_box = (x <= frame_cx <= x + w)
+            v_in_box = (y <= frame_cy <= y + h)
+            h_power  = LEFT_RIGHT_POWER_WHEN_IN_FACE_BOX if h_in_box else LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX
+            v_power  = UP_DOWN_POWER_WHEN_IN_FACE_BOX    if v_in_box else UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX
+
+            def _bound(fn, power):
+                """Bind power to a motor function, preserving its name for the HUD."""
+                wrapped = functools.partial(fn, power=power)
+                wrapped.__name__ = fn.__name__
+                return wrapped
+
             x_instruction = None
             y_instruction = None
             h_dispatched  = False
@@ -270,13 +288,13 @@ def run(motors_enabled: bool = True) -> None:
             if dx < -TOLERANCE:
                 x_instruction = 'LEFT'
                 if now - last_h_dispatch >= DISPATCH_INTERVAL:
-                    _dispatch(moveLeft, _hqueue, _h_display, motors_enabled)
+                    _dispatch(_bound(moveLeft, h_power), _hqueue, _h_display, motors_enabled)
                     last_h_dispatch = now
                     h_dispatched = True
             elif dx > TOLERANCE:
                 x_instruction = 'RIGHT'
                 if now - last_h_dispatch >= DISPATCH_INTERVAL:
-                    _dispatch(moveRight, _hqueue, _h_display, motors_enabled)
+                    _dispatch(_bound(moveRight, h_power), _hqueue, _h_display, motors_enabled)
                     last_h_dispatch = now
                     h_dispatched = True
             else:
@@ -288,13 +306,13 @@ def run(motors_enabled: bool = True) -> None:
             if dy < -TOLERANCE:
                 y_instruction = 'UP'
                 if now - last_v_dispatch >= DISPATCH_INTERVAL:
-                    _dispatch(moveUp, _vqueue, _v_display, motors_enabled)
+                    _dispatch(_bound(moveUp, v_power), _vqueue, _v_display, motors_enabled)
                     last_v_dispatch = now
                     v_dispatched = True
             elif dy > TOLERANCE:
                 y_instruction = 'DOWN'
                 if now - last_v_dispatch >= DISPATCH_INTERVAL:
-                    _dispatch(moveDown, _vqueue, _v_display, motors_enabled)
+                    _dispatch(_bound(moveDown, v_power), _vqueue, _v_display, motors_enabled)
                     last_v_dispatch = now
                     v_dispatched = True
             else:

@@ -16,8 +16,13 @@ import time
 UP_DOWN_STEP     = 360
 LEFT_RIGHT_STEP  = 30
 
-UP_DOWN_POWER    = 100
-LEFT_RIGHT_POWER = 30
+# Power when crosshair is OUTSIDE the face box (fast approach)
+LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX = 30
+UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX    = 100
+
+# Power when crosshair is INSIDE the face box (slow fine-adjustment)
+LEFT_RIGHT_POWER_WHEN_IN_FACE_BOX     = 15
+UP_DOWN_POWER_WHEN_IN_FACE_BOX        = 40
 
 # ----------------------------
 # Hardware setup
@@ -47,27 +52,27 @@ except Exception as _e:
 # Movement functions
 # ----------------------------
 
-def moveLeft():
+def moveLeft(power=LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX):
     if not _NXT_READY: return
-    motor_a.turn(LEFT_RIGHT_POWER, LEFT_RIGHT_STEP)
+    motor_a.turn(power, LEFT_RIGHT_STEP)
     time.sleep(1)
 
 
-def moveRight():
+def moveRight(power=LEFT_RIGHT_POWER_WHEN_NOT_IN_FACE_BOX):
     if not _NXT_READY: return
-    motor_a.turn(-LEFT_RIGHT_POWER, LEFT_RIGHT_STEP)
+    motor_a.turn(-power, LEFT_RIGHT_STEP)
     time.sleep(1)
 
 
-def moveUp():
+def moveUp(power=UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX):
     if not _NXT_READY: return
-    motor_b.turn(UP_DOWN_POWER, UP_DOWN_STEP)
+    motor_b.turn(power, UP_DOWN_STEP)
     time.sleep(1)
 
 
-def moveDown():
+def moveDown(power=UP_DOWN_POWER_WHEN_NOT_IN_FACE_BOX):
     if not _NXT_READY: return
-    motor_b.turn(-UP_DOWN_POWER, UP_DOWN_STEP)
+    motor_b.turn(-power, UP_DOWN_STEP)
     time.sleep(1)
 
 
