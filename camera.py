@@ -25,6 +25,7 @@ TOLERANCE              = 100    # dead-zone radius in pixels around centre
 WINDOW_NAME            = 'Guardian Vision V2'
 UI_SCALE               = 1.4
 COUNTDOWN_START        = 10     # seconds
+DISPATCH_INTERVAL      = 0.4    # minimum seconds between queue additions per axis
 
 BOX_COLOR     = (0, 255, 255)   # yellow face box (BGR)
 BOX_THICKNESS = 2
@@ -47,17 +48,35 @@ MAX_QUEUE_SIZE = 4
 _hqueue: queue.Queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
 _vqueue: queue.Queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
 
+# Mirror lists used only for HUD display — one entry per pending command.
+# Protected by _display_lock since worker threads write and main thread reads.
+_display_lock = threading.Lock()
+_h_display: list = []
+_v_display: list = []
 
-def _worker(q: queue.Queue) -> None:
+
+def _worker(q: queue.Queue, display_list: list) -> None:
     while True:
         action = q.get()
         if action is None:   # shutdown signal
             break
+        with _display_lock:
+            if display_list:
+                display_list.pop(0)   # item is now executing, remove from pending
         action()
 
 
-def _dispatch(action, q: queue.Queue) -> None:
+def _dispatch(action, q: queue.Queue, display_list: list, enabled: bool) -> None:
     """Non-blocking put. Wipes the queue and restarts if it hits MAX_QUEUE_SIZE."""
+    display_name = action.__name__.replace('move', '').upper()  # e.g. moveLeft -> LEFT
+
+    if not enabled:
+        _dn = display_name
+        def sim(_dn=_dn):
+            print(f'[sim] {_dn}')
+            time.sleep(1)   # mirrors real motor timing so the queue behaves identically
+        action = sim
+
     if q.full():
         # Queue backed up — discard stale path and start fresh
         while not q.empty():
@@ -65,8 +84,13 @@ def _dispatch(action, q: queue.Queue) -> None:
                 q.get_nowait()
             except queue.Empty:
                 break
+        with _display_lock:
+            display_list.clear()
+
     try:
         q.put_nowait(action)
+        with _display_lock:
+            display_list.append(display_name)
     except queue.Full:
         pass  # safety net for race conditions
 
@@ -75,12 +99,12 @@ def _dispatch(action, q: queue.Queue) -> None:
 # Main camera function
 # ----------------------------
 
-def run() -> None:
+def run(motors_enabled: bool = True) -> None:
     """Run the camera + HUD loop. Must be called from the main thread on macOS."""
 
     # Start the two motor worker threads before touching the camera
-    threading.Thread(target=_worker, args=(_hqueue,), daemon=True, name='motor-h').start()
-    threading.Thread(target=_worker, args=(_vqueue,), daemon=True, name='motor-v').start()
+    threading.Thread(target=_worker, args=(_hqueue, _h_display), daemon=True, name='motor-h').start()
+    threading.Thread(target=_worker, args=(_vqueue, _v_display), daemon=True, name='motor-v').start()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -103,6 +127,10 @@ def run() -> None:
     display_instruction = 'NO TARGET'
     instruction_history = []
     countdown_start     = time.time()
+
+    # Per-axis throttle: track when we last added to each queue
+    last_h_dispatch = 0.0
+    last_v_dispatch = 0.0
 
     print(f'[camera] {WINDOW_NAME} running — press Q to quit.')
 
@@ -145,20 +173,28 @@ def run() -> None:
             x_instruction = None
             y_instruction = None
 
-            # Both axes checked independently — both can fire at the same time
+            # Both axes checked independently — both queues run in parallel
             if dx < -TOLERANCE:
                 x_instruction = 'LEFT'
-                _dispatch(moveLeft, _hqueue)
+                if now - last_h_dispatch >= DISPATCH_INTERVAL:
+                    _dispatch(moveLeft, _hqueue, _h_display, motors_enabled)
+                    last_h_dispatch = now
             elif dx > TOLERANCE:
                 x_instruction = 'RIGHT'
-                _dispatch(moveRight, _hqueue)
+                if now - last_h_dispatch >= DISPATCH_INTERVAL:
+                    _dispatch(moveRight, _hqueue, _h_display, motors_enabled)
+                    last_h_dispatch = now
 
             if dy < -TOLERANCE:
                 y_instruction = 'UP'
-                _dispatch(moveUp, _vqueue)
+                if now - last_v_dispatch >= DISPATCH_INTERVAL:
+                    _dispatch(moveUp, _vqueue, _v_display, motors_enabled)
+                    last_v_dispatch = now
             elif dy > TOLERANCE:
                 y_instruction = 'DOWN'
-                _dispatch(moveDown, _vqueue)
+                if now - last_v_dispatch >= DISPATCH_INTERVAL:
+                    _dispatch(moveDown, _vqueue, _v_display, motors_enabled)
+                    last_v_dispatch = now
 
             # Pick the dominant axis for the on-screen label
             if x_instruction is None and y_instruction is None:
@@ -206,6 +242,17 @@ def run() -> None:
         hy = frame_h // 2 - int(90 * UI_SCALE)
         for i, entry in enumerate(instruction_history):
             put(entry, (20, hy + i * int(35 * UI_SCALE)), scale=0.7)
+
+        # Bottom-left: motor queue display
+        with _display_lock:
+            h_pending = list(_h_display)
+            v_pending = list(_v_display)
+
+        mode_label = '' if motors_enabled else ' (SIM)'
+        h_str = ' > '.join(h_pending) if h_pending else '--'
+        v_str = ' > '.join(v_pending) if v_pending else '--'
+        put(f'PAN{mode_label}:  {h_str}',  (20, frame_h - 110), scale=0.6)
+        put(f'TILT{mode_label}: {v_str}', (20, frame_h - 75),  scale=0.6)
 
         # Bottom-left: countdown
         remaining = max(0, COUNTDOWN_START - int(now - countdown_start))
